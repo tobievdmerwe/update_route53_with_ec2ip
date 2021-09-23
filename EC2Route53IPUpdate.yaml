@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Automatically Update public IP in Route 53 if EC2 goes into a running state
+Parameters:
+  Memory:
+    Description: Memory to allocate to Lambda function
+    Type: Number
+    Default:  3008
+  EventState:
+    Description: Whether Cloudwatch event schedule is enabled or disabled
+    Type: String
+    Default: ENABLED    
+  Route53HostedZone:
+    Description: The Route53 hosted zone that will updated with the IP addresses
+    Type: String     
+    Default: AAAAAAAAAAAA
+
+Resources:
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "AutoUpdateIP"
+      Handler: AutoUpdateIP.lambda_handler
+      Runtime: python3.9
+      Role:  !GetAtt AutoUpdateIPLambdaRole.Arn
+      MemorySize: !Ref Memory
+      Timeout: 600
+      Code: src/
+      Environment:
+         Variables:
+             Route53HostedZone: !Ref Route53HostedZone
+
+  AutoUpdateIPLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: "Lambda_Permissions"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+              - Effect: Allow
+                Action:
+                  - route53:ChangeResourceRecordSets
+                Resource: !Sub "arn:aws:route53:::hostedzone/${Route53HostedZone}"        
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                Resource: "*"          
+
+  LambdaInvokePermissionCloudwatchEventsEC2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt
+        - LambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt
+        - CloudwatchEventEC2
+        - Arn
+
+  CloudwatchEventEC2:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: Initiate-CloudWatchAlarmEC2
+      Description: Creates CloudWatch alarm to upsert public IP in Route 53.
+      EventPattern: '
+        {
+          "source": [
+            "aws.ec2"
+          ],
+          "detail-type": [
+            "EC2 Instance State-change Notification"
+          ],
+          "detail": {
+            "state": [
+              "running"
+            ]
+          }
+        }'
+      State: !Ref EventState
+      Targets:
+        - Arn: !GetAtt LambdaFunction.Arn
+          Id: LATEST
